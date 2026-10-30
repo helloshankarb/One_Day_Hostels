@@ -1,0 +1,7 @@
+{
+  "projects": {
+    "default": "demo-one-day-hostels",
+    "dev": "demo-one-day-hostels",
+    "prod": "REPLACE_WITH_PRODUCTION_PROJECT_ID"
+  }
+}

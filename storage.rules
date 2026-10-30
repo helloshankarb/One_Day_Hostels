@@ -1,0 +1,35 @@
+rules_version = '2';
+
+// One Day Hostels – Cloud Storage rules.
+service firebase.storage {
+  match /b/{bucket}/o {
+    function ownerOf(pid) {
+      return request.auth != null
+        && firestore.get(/databases/(default)/documents/properties/$(pid)).data.ownerId == request.auth.uid;
+    }
+    function isAdmin() { return request.auth != null && request.auth.token.get('role', '') == 'admin'; }
+
+    // Listing photographs are public.
+    match /properties/{pid}/photos/{file} {
+      allow read: if true;
+      allow create, update: if ownerOf(pid)
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|webp)');
+      allow delete: if ownerOf(pid) || isAdmin();
+    }
+
+    // Verification documents are private to the listing owner and administrators.
+    match /properties/{pid}/documents/{file} {
+      allow read: if ownerOf(pid) || isAdmin();
+      allow create: if ownerOf(pid)
+        && request.resource.size < 10 * 1024 * 1024
+        && request.resource.contentType.matches('application/pdf|image/(jpeg|png)');
+      allow update: if false;
+      allow delete: if ownerOf(pid) || isAdmin();
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,165 @@
+rules_version = '2';
+
+// One Day Hostels – Firestore security rules.
+// Roles come from the `role` custom claim set by Cloud Functions; profile documents never grant privileges.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function uid() { return request.auth.uid; }
+    function role() { return signedIn() ? request.auth.token.get('role', '') : ''; }
+    function isAdmin() { return role() == 'admin'; }
+    function isOwnerRole() { return role() == 'owner'; }
+    function changed() { return request.resource.data.diff(resource.data).affectedKeys(); }
+    function property(pid) { return get(/databases/$(database)/documents/properties/$(pid)).data; }
+    function ownsProperty(pid) { return signedIn() && property(pid).ownerId == uid(); }
+    function isPublic(pid) { return property(pid).status == 'approved'; }
+
+    // ---------- Reference data ----------
+    match /localities/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    match /amenities/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    // Denormalised search catalogue, maintained by Cloud Functions only.
+    match /catalog/{id} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // ---------- Users ----------
+    match /users/{userId} {
+      allow read: if signedIn() && (userId == uid() || isAdmin());
+      // Profiles are created by the completeProfile function so roles cannot be self-assigned.
+      allow create, delete: if false;
+      allow update: if signedIn() && userId == uid()
+        && changed().hasOnly(['name', 'phone', 'city', 'gender', 'updatedAt'])
+        && request.resource.data.name is string && request.resource.data.name.size() >= 2 && request.resource.data.name.size() <= 80
+        && request.resource.data.phone is string && request.resource.data.phone.matches('^(\\+91[ -]?)?[6-9][0-9]{9}$');
+
+      match /saved/{propertyId} {
+        allow read, delete: if signedIn() && userId == uid();
+        allow create: if signedIn() && userId == uid()
+          && request.resource.data.keys().hasOnly(['propertyId', 'createdAt'])
+          && request.resource.data.propertyId == propertyId
+          && request.resource.data.createdAt is int
+          && isPublic(propertyId);
+        allow update: if false;
+      }
+
+      match /notifications/{id} {
+        allow read: if signedIn() && userId == uid();
+        allow update: if signedIn() && userId == uid() && changed().hasOnly(['readAt']);
+        allow create, delete: if false;
+      }
+    }
+
+    match /ownerProfiles/{ownerId} {
+      allow read: if signedIn() && (ownerId == uid() || isAdmin());
+      allow update: if signedIn() && ownerId == uid()
+        && changed().hasOnly(['businessName', 'pan', 'gstin', 'address', 'upiId', 'onboardingStep', 'updatedAt']);
+      allow create, delete: if false;
+    }
+
+    // ---------- Properties ----------
+    match /properties/{pid} {
+      // Status, verification, ratings and the pricing summary are server-controlled.
+      function ownerEditable() {
+        return ['name', 'localityId', 'localityName', 'address', 'pincode', 'landmark', 'description', 'accommodationType',
+                'genderPolicy', 'foodType', 'instantBook', 'allowDaily', 'allowWeekly', 'allowMonthly', 'minStayDays',
+                'cancellationPolicy', 'houseRules', 'checkInTime', 'checkOutTime', 'gateCloseTime', 'mealTimes',
+                'contactPhone', 'photos', 'amenityIds', 'updatedAt'];
+      }
+      function validEnums(d) {
+        return d.genderPolicy in ['men', 'women', 'coed', 'family']
+          && d.foodType in ['pure_veg', 'veg_meals', 'veg_nonveg', 'none']
+          && d.accommodationType in ['hostel', 'pg', 'coliving', 'dormitory']
+          && d.cancellationPolicy in ['flexible', 'moderate', 'strict'];
+      }
+
+      allow get: if resource == null || resource.data.status == 'approved' || (signedIn() && resource.data.ownerId == uid()) || isAdmin();
+      // Owners list their own listings; the public uses catalog/listings instead of listing queries.
+      allow list: if isAdmin() || (signedIn() && resource.data.ownerId == uid()) || resource.data.status == 'approved';
+
+      allow create: if isOwnerRole()
+        && request.resource.data.ownerId == uid()
+        && request.resource.data.slug == pid
+        && request.resource.data.status == 'draft'
+        && request.resource.data.verified == false
+        && request.resource.data.ratingAvg == 0 && request.resource.data.ratingCount == 0
+        && request.resource.data.name is string && request.resource.data.name.size() >= 3 && request.resource.data.name.size() <= 100
+        && validEnums(request.resource.data);
+      allow update: if isAdmin()
+        || (signedIn() && resource.data.ownerId == uid()
+            && resource.data.status != 'suspended'
+            && changed().hasOnly(ownerEditable())
+            && validEnums(request.resource.data));
+      allow delete: if isAdmin() || (signedIn() && resource.data.ownerId == uid() && resource.data.status == 'draft');
+
+      match /rooms/{roomId} {
+        allow read: if isPublic(pid) || ownsProperty(pid) || isAdmin();
+        allow write: if isAdmin() || (isOwnerRole() && ownsProperty(pid) && property(pid).status != 'suspended'
+          && (request.resource == null || (
+            request.resource.data.priceDaily is int && request.resource.data.priceDaily >= 100
+            && request.resource.data.roomType in ['private', 'shared', 'dorm']
+            && request.resource.data.capacity is int && request.resource.data.capacity >= 1 && request.resource.data.capacity <= 20
+            && request.resource.data.beds is list && request.resource.data.beds.size() <= 20)));
+      }
+
+      // Owners save drafts directly; publishing runs through a Cloud Function that enforces the food classification.
+      match /menus/{date} {
+        allow get: if resource == null || (resource.data.status == 'published' && isPublic(pid)) || ownsProperty(pid) || isAdmin();
+        allow list: if (resource.data.status == 'published' && isPublic(pid)) || ownsProperty(pid) || isAdmin();
+        allow write: if isAdmin() || (isOwnerRole() && ownsProperty(pid)
+          && (request.resource == null || request.resource.data.status == 'draft'));
+      }
+
+      // Reviews are written by Cloud Functions after a verified, completed stay.
+      match /reviews/{bookingId} {
+        allow read: if resource.data.status == 'published' || ownsProperty(pid) || isAdmin();
+        allow write: if false;
+      }
+    }
+
+    // ---------- Server-only collections (bookings, payments, payouts, audit) ----------
+    match /bookings/{id} {
+      allow read: if signedIn() && (resource.data.customerId == uid() || resource.data.ownerId == uid() || isAdmin());
+      allow write: if false;
+    }
+    match /payments/{id} {
+      allow read: if signedIn() && (resource.data.customerId == uid() || resource.data.ownerId == uid() || isAdmin());
+      allow write: if false;
+    }
+    match /refunds/{id} {
+      allow read: if signedIn() && (resource.data.customerId == uid() || isAdmin());
+      allow write: if false;
+    }
+    match /payouts/{id} {
+      allow read: if signedIn() && (resource.data.ownerId == uid() || isAdmin());
+      allow write: if false;
+    }
+    match /bedNights/{id} {
+      allow read, write: if false;
+    }
+    match /auditLogs/{id} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+    // Payment transaction log and raw webhook events, for finance reporting.
+    match /paymentLogs/{id} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+    match /paymentEvents/{id} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+    match /settings/{id} {
+      allow read: if true;
+      allow write: if isAdmin() && request.auth.token.get('adminRole', '') == 'super_admin';
+    }
+  }
+}

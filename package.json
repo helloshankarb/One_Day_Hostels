@@ -1,0 +1,34 @@
+{
+  "name": "one-day-hostels",
+  "private": true,
+  "version": "1.0.0",
+  "description": "One Day Hostels - hostel, PG and accommodation booking platform for Visakhapatnam",
+  "workspaces": [
+    "server",
+    "client",
+    "functions"
+  ],
+  "scripts": {
+    "dev": "concurrently -n emulators,web -c yellow,green \"npm run emulators\" \"npm run dev -w client\"",
+    "emulators": "npm run build -w functions && firebase emulators:start --project demo-one-day-hostels --export-on-exit=.emulator-data",
+    "emulators:resume": "npm run build -w functions && firebase emulators:start --project demo-one-day-hostels --import=.emulator-data --export-on-exit=.emulator-data",
+    "seed:emulator": "npm run seed -w functions",
+    "dev:legacy": "concurrently -n api,web -c blue,green \"npm run dev -w server\" \"npm run dev -w client\"",
+    "build": "npm run build -w functions && npm run build -w client",
+    "start": "npm run start -w server",
+    "migrate": "npm run migrate -w server",
+    "seed": "npm run seed -w server",
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w functions && npm run typecheck -w client",
+    "lint": "npm run lint -w client",
+    "test": "npm run test -w server && npm run test:unit -w functions",
+    "test:emulator": "npm run test:emulator -w functions",
+    "deploy:prod": "npm run build && firebase deploy --project prod"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "firebase-tools": "^15.34.2"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
